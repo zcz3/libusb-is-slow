@@ -21,7 +21,8 @@ int main(int argc, const char *argv[])
     goto end;
   }
   
-  libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_DEBUG);
+  //libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_DEBUG);
+  libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_ERROR);
 
   start_timer();
 
@@ -83,7 +84,7 @@ static int query_devices(libusb_context *ctx)
     libusb_device *dev = devs[i];
 
     struct libusb_device_descriptor desc;
-    if(libusb_get_device_descriptor(dev, &desc) != 0)
+    if(libusb_get_device_descriptor(dev, &desc) == 0)
       printf("%04X %04X\n", desc.idVendor, desc.idProduct);
   }
 
