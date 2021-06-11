@@ -1,8 +1,9 @@
 #include <stdio.h>
-#include <Windows.h>
-#include <SetupAPI.h>
+#include <windows.h>
+#include <setupapi.h>
 #include <initguid.h>
-#include <Usbiodef.h>
+#include <usbiodef.h>
+#include <usbioctl.h>
 #include "libusb.h"
 
 static void start_timer();
@@ -114,41 +115,94 @@ static int get_usb_device_address(
   unsigned index
 )
 {
-  SP_DEVICE_INTERFACE_DATA devIfaceData;
-  memset(&devIfaceData, 0, sizeof(devIfaceData));
-  devIfaceData.cbSize = sizeof(devIfaceData);
-
-  if(!SetupDiEnumDeviceInterfaces(
-        DeviceInfoSet,
-        NULL,
-        iface_guid,
-        index,
-        &devIfaceData))
-    return -1;
-  
-  SP_DEVICE_INTERFACE_DETAIL_DATA_A *ifaceDetail = NULL;
   DWORD size = 0;
-  SetupDiGetDeviceInterfaceDetailA(
-    DeviceInfoSet, &devIfaceData,
-    NULL, 0, &size, NULL);
-  
-  if(!size);
-    return -2;
-  
-  ifaceDetail = malloc(size);
-  memset(ifaceDetail, 0, size);
-  ifaceDetail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA);
+  SP_DEVICE_INTERFACE_DETAIL_DATA_A *ifaceDetail = NULL;
+  DWORD port = 0;
 
-  if(!SetupDiGetDeviceInterfaceDetailA(
-        DeviceInfoSet, &devIfaceData,
-        ifaceDetail, size, NULL, NULL))
   {
-    free(ifaceDetail);
-    return -3;
+    // Find the device path
+
+    SP_DEVICE_INTERFACE_DATA devIfaceData;
+    memset(&devIfaceData, 0, sizeof(devIfaceData));
+    devIfaceData.cbSize = sizeof(devIfaceData);
+
+    if(!SetupDiEnumDeviceInterfaces(
+          DeviceInfoSet,
+          DeviceInfoData,
+          iface_guid,
+          0,
+          &devIfaceData))
+      return -1;
+    
+    ifaceDetail = NULL;
+    size = 0;
+    SetupDiGetDeviceInterfaceDetailA(
+      DeviceInfoSet, &devIfaceData,
+      NULL, 0, &size, NULL);
+    
+    if(!size)
+      return -2;
+    
+    ifaceDetail = malloc(size);
+    memset(ifaceDetail, 0, size);
+    ifaceDetail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA);
+
+    if(!SetupDiGetDeviceInterfaceDetailA(
+          DeviceInfoSet, &devIfaceData,
+          ifaceDetail, size, NULL, NULL))
+    {
+      free(ifaceDetail);
+      return -3;
+    }
   }
 
+  {
+    // Find the port number
 
-  return 0;
+    size = 0;
+
+    if(!SetupDiGetDeviceRegistryPropertyA(DeviceInfoSet, DeviceInfoData, SPDRP_ADDRESS, NULL, (PBYTE)&port, sizeof(port), &size))
+      return -4;
+    
+    if(size != sizeof(port))
+      return -5;
+  }
+
+  {
+    // Open device and IOCTL to find address
+
+    HANDLE hand = CreateFileA(ifaceDetail->DevicePath, GENERIC_WRITE, FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    free(ifaceDetail);
+    ifaceDetail = NULL;
+
+    if(hand == INVALID_HANDLE_VALUE)
+      return -6;
+    
+    USB_NODE_CONNECTION_INFORMATION connInfo;
+    memset(&connInfo, 0, sizeof(connInfo));
+    connInfo.ConnectionIndex = port;
+
+    BOOL ok = DeviceIoControl(hand,
+                              IOCTL_USB_GET_NODE_CONNECTION_INFORMATION,
+                              &connInfo, sizeof(connInfo),
+                              &connInfo, sizeof(connInfo),
+                              &size, 0);
+    
+    CloseHandle(hand);
+    hand = INVALID_HANDLE_VALUE;
+
+    if(!ok)// || size != sizeof(connInfo))
+      return -7;
+    
+    if(connInfo.ConnectionStatus != DeviceConnected)
+      return -8;
+    
+    if(connInfo.DeviceAddress > 255)
+      // libusb implements this check
+      return -9;
+    
+    return connInfo.DeviceAddress;
+  }
 }
 
 
