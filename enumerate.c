@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <windows.h>
 #include <setupapi.h>
+#include <cfgmgr32.h>
 #include <initguid.h>
 #include <usbiodef.h>
 #include <usbioctl.h>
@@ -106,6 +107,138 @@ static int query_devices_libusb(libusb_context *ctx)
 
 
 
+DEFINE_GUID(GUID_IFACE_HCD, 0x3ABF6F2D, 0x71C4, 0x462A, 0x8A, 0x92, 0x1E, 0x68, 0x61, 0xE6, 0xAF, 0x27);
+DEFINE_GUID(GUID_IFACE_HUB, 0xf18a0e88, 0xc30c, 0x11d0, 0x88, 0x15, 0x00, 0xa0, 0xc9, 0x06, 0xbe, 0xd8);
+DEFINE_GUID(GUID_IFACE_USB, 0xA5DCBF10L, 0x6530, 0x11D2, 0x90, 0x1F, 0x00, 0xC0, 0x4F, 0xB9, 0x51, 0xED);
+DEFINE_GUID(GUID_IFACE_WINUSB, 0xdee824ef, 0x729b, 0x4a0e, 0x9c, 0x14, 0xb7, 0x11, 0x7d, 0x33, 0xa8, 0x17);
+DEFINE_GUID(GUID_IFACE_SHOWXPRESS, 0x9ef5175d, 0x990d, 0x48be, 0xa5, 0x84, 0x57, 0x32, 0x0b, 0x3d, 0xc2, 0xe8);
+
+
+struct usb_hub {
+  DWORD devInst;
+  HANDLE handle;
+};
+
+static struct usb_hub hubs[100];
+static int num_hubs = 0;
+
+
+static HANDLE get_parent_hub_handle(PSP_DEVINFO_DATA DeviceInfoData)
+{
+  DEVINST parent = 0;
+
+
+  // Find the parent hub and see if we have already opened it
+
+  if(CM_Get_Parent(&parent, DeviceInfoData->DevInst, 0) != CR_SUCCESS || !parent)
+    return INVALID_HANDLE_VALUE;
+  
+  for(int i = 0; i < num_hubs; i++)
+  {
+    if(hubs[i].devInst == parent)
+      return hubs[i].handle;
+  }
+
+
+  // Hub not yet opened, find it
+
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  HDEVINFO devInfo = NULL;
+  SP_DEVINFO_DATA devData;
+  SP_DEVICE_INTERFACE_DETAIL_DATA_A *ifaceDetail = NULL;
+
+  devInfo = SetupDiGetClassDevs(&GUID_IFACE_HUB, NULL, NULL, DIGCF_DEVICEINTERFACE|DIGCF_PRESENT);
+
+  if(devInfo == INVALID_HANDLE_VALUE)
+    return INVALID_HANDLE_VALUE;
+  
+  for(int i = 0; ; i++)
+  {
+    memset(&devData, 0, sizeof(devData));
+    devData.cbSize = sizeof(devData);
+
+    if(!SetupDiEnumDeviceInfo(devInfo, i, &devData))
+    {
+      if(GetLastError() == ERROR_NO_MORE_ITEMS)
+        break;
+      
+      continue;
+    }
+
+    if(devData.DevInst != parent)
+      continue;
+
+    // Found it, find path and open
+
+    int n = num_hubs++;
+    memset(&(hubs[n]), 0, sizeof(hubs[0]));
+    hubs[n].devInst = devData.DevInst;
+    hubs[n].handle = INVALID_HANDLE_VALUE;
+
+    SP_DEVICE_INTERFACE_DATA devIfaceData;
+    memset(&devIfaceData, 0, sizeof(devIfaceData));
+    devIfaceData.cbSize = sizeof(devIfaceData);
+
+    DWORD size = 0;
+
+    if(!SetupDiEnumDeviceInterfaces(
+      devInfo,
+      &devData,
+      &GUID_IFACE_HUB,
+      0,
+      &devIfaceData))
+      break;
+    
+    SetupDiGetDeviceInterfaceDetailA(
+      devInfo, &devIfaceData,
+      NULL, 0, &size, NULL);
+    
+    if(!size)
+      break;
+    
+    ifaceDetail = malloc(size);
+    memset(ifaceDetail, 0, size);
+    ifaceDetail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA);
+
+    if(!SetupDiGetDeviceInterfaceDetailA(
+          devInfo, &devIfaceData,
+          ifaceDetail, size, NULL, NULL))
+      break;
+    
+    handle = CreateFileA(ifaceDetail->DevicePath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    hubs[n].handle = handle;
+
+    break;
+  }
+
+  if(ifaceDetail)
+  {
+    free(ifaceDetail);
+    ifaceDetail = NULL;
+  }
+
+  if(devInfo)
+  {
+    SetupDiDestroyDeviceInfoList(devInfo);
+    devInfo = NULL;
+  }
+
+  return handle;
+}
+
+
+static void clean_up_parent_hubs()
+{
+  for(int i = 0; i < num_hubs; i++)
+  {
+    if(hubs[i].handle != INVALID_HANDLE_VALUE)
+      CloseHandle(hubs[i].handle);
+  }
+
+  num_hubs = 0;
+}
+
+
 
 
 static int get_usb_device_address(
@@ -116,45 +249,7 @@ static int get_usb_device_address(
 )
 {
   DWORD size = 0;
-  SP_DEVICE_INTERFACE_DETAIL_DATA_A *ifaceDetail = NULL;
   DWORD port = 0;
-
-  {
-    // Find the device path
-
-    SP_DEVICE_INTERFACE_DATA devIfaceData;
-    memset(&devIfaceData, 0, sizeof(devIfaceData));
-    devIfaceData.cbSize = sizeof(devIfaceData);
-
-    if(!SetupDiEnumDeviceInterfaces(
-          DeviceInfoSet,
-          DeviceInfoData,
-          iface_guid,
-          0,
-          &devIfaceData))
-      return -1;
-    
-    ifaceDetail = NULL;
-    size = 0;
-    SetupDiGetDeviceInterfaceDetailA(
-      DeviceInfoSet, &devIfaceData,
-      NULL, 0, &size, NULL);
-    
-    if(!size)
-      return -2;
-    
-    ifaceDetail = malloc(size);
-    memset(ifaceDetail, 0, size);
-    ifaceDetail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA);
-
-    if(!SetupDiGetDeviceInterfaceDetailA(
-          DeviceInfoSet, &devIfaceData,
-          ifaceDetail, size, NULL, NULL))
-    {
-      free(ifaceDetail);
-      return -3;
-    }
-  }
 
   {
     // Find the port number
@@ -169,11 +264,9 @@ static int get_usb_device_address(
   }
 
   {
-    // Open device and IOCTL to find address
+    // Open parent hub and IOCTL to find address
 
-    HANDLE hand = CreateFileA(ifaceDetail->DevicePath, GENERIC_WRITE, FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-    free(ifaceDetail);
-    ifaceDetail = NULL;
+    HANDLE hand = get_parent_hub_handle(DeviceInfoData);
 
     if(hand == INVALID_HANDLE_VALUE)
       return -6;
@@ -187,9 +280,6 @@ static int get_usb_device_address(
                               &connInfo, sizeof(connInfo),
                               &connInfo, sizeof(connInfo),
                               &size, 0);
-    
-    CloseHandle(hand);
-    hand = INVALID_HANDLE_VALUE;
 
     if(!ok)// || size != sizeof(connInfo))
       return -7;
@@ -204,7 +294,6 @@ static int get_usb_device_address(
     return connInfo.DeviceAddress;
   }
 }
-
 
 
 /*  Wrapper around SetupDiGetDeviceRegistryPropertyA
@@ -274,10 +363,6 @@ struct usb_hcd {
 };
 
 
-DEFINE_GUID(GUID_IFACE_HCD, 0x3ABF6F2D, 0x71C4, 0x462A, 0x8A, 0x92, 0x1E, 0x68, 0x61, 0xE6, 0xAF, 0x27);
-DEFINE_GUID(GUID_IFACE_USB, 0xA5DCBF10L, 0x6530, 0x11D2, 0x90, 0x1F, 0x00, 0xC0, 0x4F, 0xB9, 0x51, 0xED);
-DEFINE_GUID(GUID_IFACE_WINUSB, 0xdee824ef, 0x729b, 0x4a0e, 0x9c, 0x14, 0xb7, 0x11, 0x7d, 0x33, 0xa8, 0x17);
-DEFINE_GUID(GUID_IFACE_SHOWXPRESS, 0x9ef5175d, 0x990d, 0x48be, 0xa5, 0x84, 0x57, 0x32, 0x0b, 0x3d, 0xc2, 0xe8);
 
 static int query_devices_win()
 {
@@ -405,6 +490,8 @@ static int query_devices_win()
   }
 
 end:
+  clean_up_parent_hubs();
+
   if(devInfo != NULL && devInfo != INVALID_HANDLE_VALUE)
     SetupDiDestroyDeviceInfoList(devInfo);
   
