@@ -114,6 +114,30 @@ DEFINE_GUID(GUID_IFACE_WINUSB, 0xdee824ef, 0x729b, 0x4a0e, 0x9c, 0x14, 0xb7, 0x1
 DEFINE_GUID(GUID_IFACE_SHOWXPRESS, 0x9ef5175d, 0x990d, 0x48be, 0xa5, 0x84, 0x57, 0x32, 0x0b, 0x3d, 0xc2, 0xe8);
 
 
+static int check_dev_status(PSP_DEVINFO_DATA DeviceInfoData)
+{
+  ULONG status = 0;
+  ULONG problem = 0;
+
+  if(CM_Get_DevNode_Status(&status, &problem, DeviceInfoData->DevInst, 0) != CR_SUCCESS)
+    return FALSE;
+  
+  if(status & DN_HAS_PROBLEM)
+    return FALSE;
+  
+  if(problem)
+    return FALSE;
+
+  if(!(status & DN_DRIVER_LOADED))
+    return FALSE;
+  
+  if(!(status & DN_STARTED))
+    return FALSE;
+  
+  return TRUE;
+}
+
+
 struct usb_hub {
   DWORD devInst;
   HANDLE handle;
@@ -174,6 +198,9 @@ static HANDLE get_parent_hub_handle(PSP_DEVINFO_DATA DeviceInfoData)
     memset(&(hubs[n]), 0, sizeof(hubs[0]));
     hubs[n].devInst = devData.DevInst;
     hubs[n].handle = INVALID_HANDLE_VALUE;
+
+    if(!check_dev_status(&devData))
+      break;
 
     SP_DEVICE_INTERFACE_DATA devIfaceData;
     memset(&devIfaceData, 0, sizeof(devIfaceData));
@@ -444,6 +471,9 @@ static int query_devices_win()
         
         continue;
       }
+
+      if(!check_dev_status(&devData))
+        continue;
 
       // location_path will look like "PCIROOT(0)#PCI(1D00)#USBROOT(0)#USB(1)#USB(1)"
       // Find out which bus number by matching the start of the string to a HCD
